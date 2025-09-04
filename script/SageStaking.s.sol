@@ -2,9 +2,9 @@
 pragma solidity ^0.8.13;
 
 import {Script} from "forge-std/Script.sol";
-import {Staking} from "../src/PulpStaking.sol";
+import {Staking} from "../src/SageStaking.sol";
 
-contract PulpStakingScript is Script {
+contract SageStakingScript is Script {
     Staking public staking;
 
     function setUp() public {}
