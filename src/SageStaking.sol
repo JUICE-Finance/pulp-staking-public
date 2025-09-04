@@ -6,28 +6,30 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 
-struct WithdrawalInfo {
+
+enum StakingPositionStatus {
+    Active,
+    WithdrawalInitiated,
+    WithdrawalCompleted
+}
+
+struct StakingPosition {
     uint256 amount;
-    uint256 unlocksAt;
     uint256 nonce;
-    bool withdrawn;
+    uint256 depositTimestamp;
+    StakingPositionStatus status;
+    uint256 unlocksAt;
 }
 
-
-struct BalanceInfo {
-    uint256 idleDepositAmount;
-    uint256 pendingWithdrawalAmount;
-}
-
-event Deposit(address indexed user, uint256 amount, uint256 timestamp);
+event Deposit(address indexed user, uint256 amount, uint256 nonce, uint256 timestamp);
 event InitiateWithdraw(address indexed user, uint256 nonce, uint256 unlocksAt, uint256 timestamp);
 event Withdraw(address indexed user, uint256 amount, uint256 nonce, uint256 timestamp);
+event RestakeFromWithdrawalInitiated(address indexed user, uint256 nonce, uint256 amount, uint256 timestamp);
 
 
-contract Staking is ReentrancyGuard, Ownable {
+contract SageStaking is ReentrancyGuard, Ownable {
 
-    mapping(address => mapping(uint256 => WithdrawalInfo)) public withdrawalInfo;
-    mapping(address => BalanceInfo) public balanceInfo;
+    mapping(address => mapping(uint256 => StakingPosition)) public stakingPositions;
 
     uint256 public cooldownPeriod;
     IERC20 public token;
@@ -44,68 +46,83 @@ contract Staking is ReentrancyGuard, Ownable {
         require(amount > 0, "Amount must be greater than 0");
         require(token.transferFrom(msg.sender, address(this), amount), "Transfer failed");
         
-        // Add deposit amount to user's idle deposit balance
-        balanceInfo[msg.sender].idleDepositAmount += amount;
+        // Create a new staking position with the current global nonce
+        stakingPositions[msg.sender][globalNonce] = StakingPosition({
+            amount: amount,
+            nonce: globalNonce,
+            depositTimestamp: block.timestamp,
+            status: StakingPositionStatus.Active,
+            unlocksAt: 0 // Not applicable for deposits, only used when withdrawal is initiated
+        });
+        
+        // Store current nonce for event 
+        uint256 currentNonce = globalNonce;
+        
+        // Increment global nonce for next position
+        globalNonce++;
 
-        emit Deposit(msg.sender, amount, block.timestamp);
+        emit Deposit(msg.sender, amount, currentNonce, block.timestamp);
     }
 
     
-    function initiateWithdraw(uint256 amount) external {
-        require(amount > 0, "Amount must be greater than 0");
+    function initiateWithdraw(uint256 nonce) external {
+        // Get the staking position for the given nonce
+        StakingPosition storage position = stakingPositions[msg.sender][nonce];
         
-        // Ensure user has enough idle deposits to withdraw
-        require(balanceInfo[msg.sender].idleDepositAmount >= amount, "Insufficient idle deposit balance");
+        // Ensure the position exists (amount would be 0 for non-existent positions)
+        require(position.amount > 0, "Staking position does not exist");
         
-        // Move amount from idle deposits to pending withdrawals
-        balanceInfo[msg.sender].idleDepositAmount -= amount;
-        balanceInfo[msg.sender].pendingWithdrawalAmount += amount;
+        // Ensure the position is currently Active
+        require(position.status == StakingPositionStatus.Active, "Position must be active to initiate withdrawal");
         
-        // Store withdrawal information in withdrawalInfo mapping
-        withdrawalInfo[msg.sender][globalNonce] = WithdrawalInfo({
-            amount: amount,
-            unlocksAt: block.timestamp + cooldownPeriod,
-            nonce: globalNonce,
-            withdrawn: false
-        });
+        // Update the position status to WithdrawalInitiated
+        position.status = StakingPositionStatus.WithdrawalInitiated;
         
-        // Store current nonce for event
-        uint256 currentNonce = globalNonce;
-        
-        // Increment global nonce for next withdrawal
-        globalNonce++;
+        // Set the unlock time
+        position.unlocksAt = block.timestamp + cooldownPeriod;
         
         // Emit the InitiateWithdraw event
-        emit InitiateWithdraw(msg.sender, currentNonce, block.timestamp + cooldownPeriod, block.timestamp);
+        emit InitiateWithdraw(msg.sender, nonce, position.unlocksAt, block.timestamp);
     }
 
     function withdraw(uint256 nonce) nonReentrant() external {
-        // Get the withdrawal info for the given nonce
-        WithdrawalInfo storage withdrawal = withdrawalInfo[msg.sender][nonce];
+        // Get the staking position for the given nonce
+        StakingPosition storage position = stakingPositions[msg.sender][nonce];
         
-        // Ensure withdrawal exists (amount would be 0 for non-existent withdrawals)
-        require(withdrawal.amount > 0, "Withdrawal does not exist");
-        
-        // Check that this withdrawal hasn't already been processed
-        require(!withdrawal.withdrawn, "Withdrawal already processed");
+        // Ensure the position has withdrawal initiated
+        require(position.status == StakingPositionStatus.WithdrawalInitiated, "Withdrawal not initiated for this position");
         
         // Ensure the unlock time has passed
-        require(withdrawal.unlocksAt <= block.timestamp, "Withdrawal not yet unlocked");
+        require(position.unlocksAt <= block.timestamp, "Withdrawal not yet unlocked");
         
-        // Subtract amount from pending withdrawals
-        balanceInfo[msg.sender].pendingWithdrawalAmount -= withdrawal.amount;
-        
-        // Mark withdrawal as completed
-        withdrawal.withdrawn = true;
+        // Update the position status to WithdrawalCompleted
+        position.status = StakingPositionStatus.WithdrawalCompleted;
         
         // Store amount for transfer
-        uint256 transferAmount = withdrawal.amount;
+        uint256 transferAmount = position.amount;
         
         // Transfer tokens back to user
         require(token.transfer(msg.sender, transferAmount), "Transfer failed");
         
         // Emit the Withdraw event
         emit Withdraw(msg.sender, transferAmount, nonce, block.timestamp);
+    }
+
+    function userRestakeFromWithdrawalInitiated(uint256 nonce) external {
+        StakingPosition storage position = stakingPositions[msg.sender][nonce];
+        require(position.status == StakingPositionStatus.WithdrawalInitiated, "Withdrawal not initiated for this position");
+        
+        // Reset status back to Active
+        position.status = StakingPositionStatus.Active;
+        
+        // Clear the unlock time
+        position.unlocksAt = 0;
+        
+        // Update deposit timestamp to current time
+        position.depositTimestamp = block.timestamp;
+        
+        // Emit the RestakeFromWithdrawalInitiated event
+        emit RestakeFromWithdrawalInitiated(msg.sender, nonce, position.amount, block.timestamp);
     }
 
     function adminChangeCooldownPeriod(uint256 _cooldownPeriod) external onlyOwner {

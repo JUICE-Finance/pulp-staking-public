@@ -2,10 +2,10 @@
 pragma solidity ^0.8.13;
 
 import {Script} from "forge-std/Script.sol";
-import {Staking} from "../src/SageStaking.sol";
+import {SageStaking} from "../src/SageStaking.sol";
 
 contract SageStakingScript is Script {
-    Staking public staking;
+    SageStaking public staking;
 
     function setUp() public {}
 
@@ -16,7 +16,7 @@ contract SageStakingScript is Script {
         address tokenAddress = 0x0000000000000000000000000000000000000000;
         uint256 cooldownPeriod = 2 weeks;
         
-        staking = new Staking(cooldownPeriod, tokenAddress);
+        staking = new SageStaking(cooldownPeriod, tokenAddress);
 
         vm.stopBroadcast();
     }
